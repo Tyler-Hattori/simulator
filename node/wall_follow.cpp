@@ -1,166 +1,124 @@
-#include "f1tenth_simulator/wall_follow_utility.h"
-
-#include <ros/ros.h>
 #include <ackermann_msgs/AckermannDriveStamped.h>
+#include <ros/ros.h>
 #include <sensor_msgs/LaserScan.h>
+#include <std_msgs/Float32.h>
+#include <std_msgs/Float64.h>
 
-class WallFollow
-{
+#include "math.h"
+
+#define KP 1.00
+#define KD 0.001
+#define KI 0.005
+#define SERVO_OFFSET 0.00
+#define ANGLE_RANGE 270
+#define DISIRED_DISTANCE_RIGHT 0.9
+#define DISIRED_DISTANCE_LEFT 1.20
+#define CAR_LENGTH 0.50
+#define PI 3.1415927
+
+class SubscribeAndPublish {
 public:
-    WallFollow():
-            node_handle_(ros::NodeHandle()),
-            lidar_sub_(node_handle_.subscribe("scan", 5, &WallFollow::scan_callback, this)),
-            drive_pub_(node_handle_.advertise<ackermann_msgs::AckermannDriveStamped>("nav", 5))
-    {
-        node_handle_.getParam("/kp", kp_);
-        node_handle_.getParam("/ki", ki_);
-        node_handle_.getParam("/kd", kd_);
-        prev_error_ = 0.0;
-        error_ = 0.0;
-        integral_ = 0.0;
-        node_handle_.getParam("/desired_distance_left", desired_left_wall_distance_);
-        node_handle_.getParam("/lookahead_distance", lookahead_distance_);
-        prev_reading_time_ = ros::Time::now().toNSec();
-        current_reading_time = ros::Time::now().toNSec();
-        node_handle_.getParam("/error_based_velocities", error_based_velocities_);
-        node_handle_.getParam("/truncated_coverage_angle", truncated_coverage_angle_);
-        node_handle_.getParam("/smoothing_filter_size", smoothing_filter_size_);
+    SubscribeAndPublish() {
+        //Topic you want to publish
+        pub_ = n_.advertise<ackermann_msgs::AckermannDriveStamped>("/nav", 1000);
+
+        //Topic you want to subscribe
+        sub_ = n_.subscribe("/scan", 1000, &SubscribeAndPublish::callback, this);
     }
 
-    std::vector<double> preprocess_scan(const sensor_msgs::LaserScan::ConstPtr &scan_msg)
-    {
-        auto truncated_ranges = wf::truncate(scan_msg, truncated_coverage_angle_);
-        for(auto& range : truncated_ranges)
-        {
-            if(std::isnan(range))
-            {
-                range = 0;
-            }
+    void callback(const sensor_msgs::LaserScan& lidar_info) {
+        unsigned int b_indx = (unsigned int)(floor((90.0 / 180.0 * PI - lidar_info.angle_min) / lidar_info.angle_increment));
+        double b_angle = 90.0 / 180.0 * PI;
+        double a_angle = 45.0 / 180.0 * PI;
+        unsigned int a_indx;
+        if (lidar_info.angle_min > 45.0 / 180.0 * PI) {
+            a_angle = lidar_info.angle_min;
+            a_indx = 0;
+        } else {
+            a_indx = (unsigned int)(floor((45.0 / 180.0 * PI - lidar_info.angle_min) / lidar_info.angle_increment));
         }
-        return wf::apply_smoothing_filter(truncated_ranges, smoothing_filter_size_);
+        // unsigned int c_indx = (unsigned int)(floor((70.0 / 180.0 * PI - lidar_info.angle_min) / lidar_info.angle_increment));
+        // double c_angle = 70.0 / 180.0 * PI;
+        double a_range = 0.0;
+        double b_range = 0.0;
+        // double c_range = 0.0;
+        if (!std::isinf(lidar_info.ranges[a_indx]) && !std::isnan(lidar_info.ranges[a_indx])) {
+            a_range = lidar_info.ranges[a_indx];
+        } else {
+            a_range = 100.0;
+        }
+        if (!std::isinf(lidar_info.ranges[b_indx]) && !std::isnan(lidar_info.ranges[b_indx])) {
+            b_range = lidar_info.ranges[b_indx];
+        } else {
+            b_range = 100.0;
+        }
+        // if (!std::isinf(lidar_info.ranges[c_indx]) && !std::isnan(lidar_info.ranges[c_indx])) {
+        //     c_range = lidar_info.ranges[c_indx];
+        // }
+        ROS_INFO_STREAM("d_t1");
+        // ROS_INFO_STREAM(lidar_info.angle_min);
+        // ROS_INFO_STREAM(lidar_info.angle_max);
+        // ROS_INFO_STREAM(lidar_info.angle_increment);
+        // ROS_INFO_STREAM(a_angle);
+        // ROS_INFO_STREAM(b_angle);
+        // ROS_INFO_STREAM(a_indx);
+        // ROS_INFO_STREAM(b_indx);
+        // ROS_INFO_STREAM(a_range);
+        // ROS_INFO_STREAM(b_range);
+        double alpha = atan((a_range * cos(b_angle - a_angle) - b_range) / (a_range * sin(b_angle - a_angle)));
+        // double alpha_2 = atan((c_range * cos(b_angle - c_angle) - b_range) / (c_range * sin(b_angle - c_angle)));
+        // alpha = (alpha + alpha_2) / 2.0;
+        double d_t = b_range * cos(alpha);
+        // double d_t1 = d_t + velocity * del_time * sin(alpha);
+        double d_t1 = d_t + 1.00 * sin(alpha);
+        error = DISIRED_DISTANCE_LEFT - d_t1;
+        ROS_INFO_STREAM(d_t1);
+        ROS_INFO_STREAM(error);
+        ROS_INFO_STREAM(del_time);
+        SubscribeAndPublish::pid_control();
     }
 
-    /// Returns the distance from obstacle at a given angle from the Laser Scan Message
-    /// @param scan_msg - Laser Scan Message
-    /// @param angle - Angle in Radians (0 rads -> right in front of the Car)
-    /// @return
-    double get_range_at_angle(const std::vector<double> &filtered_scan, const double& angle,
-            const double angle_increment) const
-    {
-        const double corrected_angle = angle + (truncated_coverage_angle_/2);
-        ROS_DEBUG("Corrected Angle : %f", corrected_angle);
-
-        const double required_range_index = static_cast<int>(floor(corrected_angle/angle_increment));
-        ROS_DEBUG("Required Range Index : %f", required_range_index);
-
-        ROS_DEBUG("Required Range Value : %f", filtered_scan[required_range_index]);
-        return filtered_scan[required_range_index];
-    }
-
-    /// PID controller to control the steering of the car and adjust the velocity accordingly
-    void control_steering()
-    {
-        prev_reading_time_ = current_reading_time;
-        current_reading_time = ros::Time::now().toSec();
-        const auto dt = current_reading_time - prev_reading_time_;
-
-        integral_ += error_;
-
-        double steering_angle = kp_ * error_ + kd_ * (error_ - prev_error_) / dt + ki_ * (integral_);
-
-        ackermann_msgs::AckermannDriveStamped drive_msg;
-        drive_msg.header.stamp = ros::Time::now();
-        drive_msg.header.frame_id = "laser";
-
-        if(std::isnan(steering_angle))
-        {
-            drive_msg.drive.speed = 0;
-            drive_msg.drive.steering_angle = 0;
-            std::__throw_runtime_error("The Control Value to Steering cannot be nan");
+    void pid_control() {
+        ackermann_msgs::AckermannDriveStamped ackermann_drive_result;
+        double tmoment = ros::Time::now().toSec();
+        del_time = tmoment - prev_tmoment;
+        integral += prev_error * del_time;
+        ackermann_drive_result.drive.steering_angle = -(KP * error + KD * (error - prev_error) / del_time + KI * integral);
+        prev_tmoment = tmoment;
+        if (abs(ackermann_drive_result.drive.steering_angle) > 20.0 / 180.0 * PI) {
+            ackermann_drive_result.drive.speed = 0.5;
+            velocity = 0.5;
+        } else if (abs(ackermann_drive_result.drive.steering_angle) > 10.0 / 180.0 * PI) {
+            ackermann_drive_result.drive.speed = 1.0;
+            velocity = 0.5;
+        } else {
+            ackermann_drive_result.drive.speed = 1.5;
+            velocity = 0.5;
         }
-
-        // Thresholding for limiting the movement of car wheels to avoid servo locking
-        if(steering_angle > 0.4)
-        {
-            steering_angle = 0.4;
-        }
-        else if(steering_angle < -0.4)
-        {
-            steering_angle = -0.4;
-        }
-
-        ROS_DEBUG("Steering Angle : %f", steering_angle);
-        drive_msg.drive.steering_angle = steering_angle;
-
-        if(abs(steering_angle) > 0.349)
-        {
-            drive_msg.drive.speed = error_based_velocities_["high"];
-        }
-        else if(abs(steering_angle) > 0.174)
-        {
-            drive_msg.drive.speed = error_based_velocities_["medium"];
-        }
-        else
-        {
-            drive_msg.drive.speed = error_based_velocities_["low"];
-        }
-        drive_pub_.publish(drive_msg);
-
-        prev_error_ = error_;
-    }
-
-    /// Returns value of Error between the required distance and the current distance
-    /// @param scan_msg
-    /// @param left_distance
-    /// @return
-    void get_error(const std::vector<double> &filtered_ranges, const double angle_increment)
-    {
-        const auto distance_of_a = get_range_at_angle(filtered_ranges, 0.5, angle_increment);
-        const auto distance_of_b = get_range_at_angle(filtered_ranges, 1.4, angle_increment);
-        constexpr auto theta = 0.9;
-
-        const auto alpha = std::atan2(distance_of_a*cos(theta)-distance_of_b,distance_of_a*sin(theta));
-        ROS_DEBUG("alpha: %f", alpha);
-
-        const auto distance_t = distance_of_b*cos(alpha);
-        const auto distance_tplus1 = distance_t + lookahead_distance_*sin(alpha);
-
-        error_ = distance_tplus1 - desired_left_wall_distance_ ;
-    }
-
-    /// Scan Callback Function
-    /// @param scan_msg
-    void scan_callback(const sensor_msgs::LaserScan::ConstPtr &scan_msg)
-    {
-        const auto filtered_ranges = preprocess_scan(scan_msg);
-        get_error(filtered_ranges, scan_msg->angle_increment);
-        control_steering();
+        pub_.publish(ackermann_drive_result);
     }
 
 private:
-    ros::NodeHandle node_handle_;
-    ros::Subscriber lidar_sub_;
-    ros::Publisher drive_pub_;
+    ros::NodeHandle n_;
+    ros::Publisher pub_;
+    ros::Subscriber sub_;
+    double prev_error = 0.0;
+    double prev_tmoment = ros::Time::now().toSec();
+    double error = 0.0;
+    double integral = 0.0;
+    double velocity = 0.0;
+    double del_time = 0.0;
 
-    double kp_, ki_, kd_;
-    double prev_error_, error_;
-    double integral_;
+};  // End of class SubscribeAndPublish
 
-    double prev_reading_time_;
-    double current_reading_time;
+int main(int argc, char** argv) {
+    //Initiate ROS
+    ros::init(argc, argv, "wall_follower");
 
-    double desired_left_wall_distance_;
-    double lookahead_distance_;
-    double truncated_coverage_angle_;
+    //Create an object of class SubscribeAndPublish that will take care of everything
+    SubscribeAndPublish SAPObject;
 
-    int smoothing_filter_size_;
-    std::map<std::string, double> error_based_velocities_;
-};
-
-int main(int argc, char ** argv)
-{
-    ros::init(argc, argv, "wall_follow_node");
-    WallFollow wall_follower;
     ros::spin();
+
     return 0;
 }
