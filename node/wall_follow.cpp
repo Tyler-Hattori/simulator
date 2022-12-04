@@ -14,7 +14,7 @@
 // for RAND_MAX
 #include <cstdlib>
 
-class WallFollow {
+class WallFollower {
 private:
     // A ROS node
     ros::NodeHandle n;
