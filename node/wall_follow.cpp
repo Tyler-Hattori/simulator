@@ -55,7 +55,7 @@ public:
         // if (!std::isinf(lidar_info.ranges[c_indx]) && !std::isnan(lidar_info.ranges[c_indx])) {
         //     c_range = lidar_info.ranges[c_indx];
         // }
-        ROS_INFO_STREAM("d_t1");
+        // ROS_INFO_STREAM("d_t1");
         // ROS_INFO_STREAM(lidar_info.angle_min);
         // ROS_INFO_STREAM(lidar_info.angle_max);
         // ROS_INFO_STREAM(lidar_info.angle_increment);
@@ -72,9 +72,9 @@ public:
         // double d_t1 = d_t + velocity * del_time * sin(alpha);
         double d_t1 = d_t + 1.00 * sin(alpha);
         error = DISIRED_DISTANCE_LEFT - d_t1;
-        ROS_INFO_STREAM(d_t1);
-        ROS_INFO_STREAM(error);
-        ROS_INFO_STREAM(del_time);
+        // ROS_INFO_STREAM(d_t1);
+        // ROS_INFO_STREAM(error);
+        // ROS_INFO_STREAM(del_time);
         SubscribeAndPublish::pid_control();
     }
 
